@@ -1,6 +1,1 @@
-langchain-openai
-openai
-python-dotenv
-langchain-ollama
-pydantic
 requests
