@@ -157,7 +157,7 @@ def run_agent(task: str, model: str = "llama3.2", max_steps: int = 12) -> str:
     ]
 
     for step in range(1, max_steps + 1):
-        raw = ollama_chat(model=model, messages=messages)
+        raw = ollama_chat(model=model, message=messages)
         obj, err = parse_agent_json(raw)
 
         if obj is None:
