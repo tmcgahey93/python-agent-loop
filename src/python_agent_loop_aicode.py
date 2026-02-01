@@ -18,7 +18,6 @@ def ollama_chat(model: str, messages: List[Dict[str, str]], temperature: float =
     """
     Calls Ollama's /api/chat endpoint.
     """
-    #url = "http://127.0.0.1:11434/api/chat"
     url=os.environ["LL_MODEL_URL"]
     payload = {
         "model": model,
