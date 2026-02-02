@@ -171,8 +171,6 @@ def run_agent(task: str, model: str = "llama3.2", max_steps: int = 12) -> str:
         raw = ollama_chat(model=model, messages=messages)
         obj, err = parse_agent_json(raw)
 
-        print(raw)
-
         if obj is None:
             # Tell the model it violated protocol and try again
             messages.append({"role": "assistant", "content": raw})
@@ -180,7 +178,6 @@ def run_agent(task: str, model: str = "llama3.2", max_steps: int = 12) -> str:
             continue
 
         if obj.get("type") == "final":
-            print("In final")
             return obj.get("answer", "")
         
         if obj.get("type") != "tool":
