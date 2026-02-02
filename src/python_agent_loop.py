@@ -131,6 +131,7 @@ Rules:
 - Only call tools that exist in the tool list.
 - If you need info from the environment/files, call a tool rather than guessing.
 - Keep steps small and verify with tools when relevant.
+- You can only respond with a single tool that will be invoked per iteration
 """
 
 def tools_manifest() -> str:
@@ -166,8 +167,11 @@ def run_agent(task: str, model: str = "llama3.2", max_steps: int = 12) -> str:
     ]
 
     for step in range(1, max_steps + 1):
+        raw = ""
         raw = ollama_chat(model=model, messages=messages)
         obj, err = parse_agent_json(raw)
+
+        print(raw)
 
         if obj is None:
             # Tell the model it violated protocol and try again
@@ -176,6 +180,7 @@ def run_agent(task: str, model: str = "llama3.2", max_steps: int = 12) -> str:
             continue
 
         if obj.get("type") == "final":
+            print("In final")
             return obj.get("answer", "")
         
         if obj.get("type") != "tool":
