@@ -14,14 +14,14 @@ load_dotenv()
 # --------------------------
 # Ollama client
 # --------------------------
-def ollama_chat(model: str, message: List[Dict[str, str]], temperature: float = 0.2) -> str:
+def ollama_chat(model: str, messages: List[Dict[str, str]], temperature: float = 0.2) -> str:
     """
     Calls Ollama's /api/chat endpoint.
     """
     url=os.environ["LL_MODEL_URL"]
     payload = {
         "model": model,
-        "messages": message,
+        "messages": messages,
         "stream": False,
         "options": {"temperature": temperature},
     }
@@ -44,14 +44,14 @@ def tool_calc(expression: str) -> str:
     """
     Very small calculator. Only allows digits/operators/paren/space/dot.
     """
-    if not re.fullmatch(r"[0-9+\-*().\s]", expression):
+    if not re.fullmatch(r"[0-9+\-*/().\s]+", expression):
         return "ERROR: expression contains invalid characters"
     try:
         #eval is safe-ish here because we strictly whitelist chars
         result = eval(expression, {"__builtins__": {}})
         return str(result)
     except Exception as e:
-        return f"Error: {e}"
+        return f"ERROR: {e}"
         
 def tool_read_file(path: str) -> str:
     if not os.path.exists(path):
@@ -60,10 +60,10 @@ def tool_read_file(path: str) -> str:
         return f.read()
     
 def tool_write_file(path: str, content: str) -> str:
-    os.makedirs(os.path.dirname(path) or ".", exists_ok=True)
-    with open(path, "w", encoding="UTF-8") as f:
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf=8") as f:
         f.write(content)
-    return f"OK: wrote {len(content)} bytes as {path}"
+    return f"OK: wrote {len(content)} bytes to {path}"
 
 
 def tool_run_shell(cmd: str) -> str:
@@ -72,15 +72,15 @@ def tool_run_shell(cmd: str) -> str:
     - no interactive shells
     - returns stdout/stderr
     """
-    #You can tighten these rules further if you want.
-    banned = ["tm -rf", ":(){", "mkfs", "dd", "shutdown", "reboot"]
+    # You can tighten these rules further if you want.
+    banned = ["rm -rf", ":(){", "mkfs", "dd ", "shutdown", "reboot"]
     lowered = cmd.lower()
     if any(b in lowered for b in banned):
         return "ERROR: command blocked by safety policy"
     
     try:
         parts = shlex.split(cmd)
-        p = subprocess.run(parts, capture_output=True, timeout=30)
+        p = subprocess.run(parts, capture_output=True, text=True, timeout=30)
         out = (p.stdout or "") + (("\n" + p.stderr) if p.stderr else "")
         return out.strip() if out.strip() else f"(no output, exit={p.returncode})"
     except Exception as e:
@@ -103,6 +103,12 @@ TOOLS: Dict[str, Tool] = {
         name="write_file",
         description="Write a UTF-8 text file to disk (overwrites).",
         args_schema={"path": "string", "content": "string"},
+        fn=tool_write_file,
+    ),
+    "run_shell": Tool(
+        name="run_shell",
+        description="Run a non-interactive shell command and return stdout/stderr.",
+        args_schema={"cmd": "string"},
         fn=tool_run_shell,
     ),
 }
@@ -137,14 +143,14 @@ def tools_manifest() -> str:
 def parse_agent_json(text: str) -> Tuple[Optional[Dict[str, Any]], str]:
     """
     Tries hard to find a JSON object in model output.
-    Returns (obj, error_messsage)
+    Returns (obj, error_message)
     """
-    text=text.strip()
+    text = text.strip()
     try:
         return json.loads(text), ""
     except Exception:
-        #attempt to extract first {...} block
-        m = re.search(r"\{.*}", text, re.DOTALL)
+        # attempt to extract first {...} block
+        m = re.search(r"\{.*\}", text, re.DOTALL)
         if not m:
             return None, "No JSON object found in response."
         try:
@@ -159,10 +165,8 @@ def run_agent(task: str, model: str = "llama3.2", max_steps: int = 12) -> str:
         {"role": "user", "content": f"Task: {task}"},
     ]
 
-    print(task)
-
     for step in range(1, max_steps + 1):
-        raw = ollama_chat(model=model, message=messages)
+        raw = ollama_chat(model=model, messages=messages)
         obj, err = parse_agent_json(raw)
 
         if obj is None:
@@ -172,7 +176,6 @@ def run_agent(task: str, model: str = "llama3.2", max_steps: int = 12) -> str:
             continue
 
         if obj.get("type") == "final":
-            print(obj.get("asnser", ""))
             return obj.get("answer", "")
         
         if obj.get("type") != "tool":
@@ -205,4 +208,4 @@ def run_agent(task: str, model: str = "llama3.2", max_steps: int = 12) -> str:
 if __name__ == "__main__":
     # Try a couple tasks:
     print(run_agent("Compute (17*3) + 2, and return the number only."))
-    print(run_agent("Write a file ./out/hello.txt that contains 'hello from the agent' then read it to confirm contents."))
+    print(run_agent("Write a file ./out/hello.txt that contains 'hello from the agent' then read it back and confirm contents."))
