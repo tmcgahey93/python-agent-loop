@@ -159,6 +159,14 @@ def parse_agent_json(text: str) -> Tuple[Optional[Dict[str, Any]], str]:
         except Exception as e:
             return None, f"Failed to parse extracted JSON: {e}"
         
+def format_plan(plan: List[str], current_step: int) -> str:
+    lines = []
+    for i, s in enumerate(plan):
+        prefix = "->" if i == current_step else "  "
+        check = "✓" if i < current_step else " "
+        lines.apend(f"{prefix} [{check}] {i+1}, {s}")
+    return "\n".join(lines) if lines else "(empty plan)"
+        
 def run_agent(task: str, model: str = "llama3.2", max_steps: int = 12) -> str:
     messages: List[Dict[str, str]] = [
         {"role": "system", "content": SYSTEM},
