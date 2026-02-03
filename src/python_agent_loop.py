@@ -168,6 +168,9 @@ def format_plan(plan: List[str], current_step: int) -> str:
     return "\n".join(lines) if lines else "(empty plan)"
         
 def run_agent(task: str, model: str = "llama3.2", max_steps: int = 12) -> str:
+    plan: List[str] = []
+    current_step = 0
+
     messages: List[Dict[str, str]] = [
         {"role": "system", "content": SYSTEM},
         {"role": "user", "content": f"Available tools:\n{tools_manifest()}"},
@@ -175,32 +178,63 @@ def run_agent(task: str, model: str = "llama3.2", max_steps: int = 12) -> str:
     ]
 
     for step in range(1, max_steps + 1):
-        raw = ""
+        # Provide plan context every loop (keeps model grounded)
+        if plan:
+            messages.append({
+                "role": "user",
+                "content": "Current plan (arrow is current step):\n" + format_plan(plan, current_step)
+            })
+        else:
+            messages.append({"role": "user", "content": "No plan exists yet. Create one."})
+
         raw = ollama_chat(model=model, messages=messages)
         obj, err = parse_agent_json(raw)
 
         if obj is None:
-            # Tell the model it violated protocol and try again
             messages.append({"role": "assistant", "content": raw})
-            messages.append({"role": "user", "content": f"Your last response was invalid JSON. Error: {err}. Respond again with ONLY one JSON object."})
+            messages.append({"role": "user", 
+                             "content": f"Your last response was invalid JSON. Error: {err}. Respond again with ONLY one JSON object."
+            })
             continue
 
-        if obj.get("type") == "final":
+        t = obj.get("type")
+
+        if t in ("plan", "replan"):
+            steps_list = obj.get("steps")
+            if not isinstance(steps_list, list) or not all(isinstance(x, str) for x in steps_list):
+                messages.append({"role": "assistant", "content": raw})
+                messages.append({
+                "role}": "user",
+                "content": 'Plan must be {"type":"plan":"steps":[...strings...]}, Try again.'
+                })
+                continue
+
+            plan = [s.strip() for s in steps_list if s.strip()]
+            current_step = 0
+
+            messages.append({"role": "assistant", "content": "raw"})
+            messages.append({
+                "role": "user",
+                "content": 'No plan exists. You MUST respond with {"type":"plan":,"steps":[...]}.'
+            })
+            continue
+
+        # ---- FINAL ----
+        if t == "final":
             return obj.get("answer", "")
         
-        if obj.get("type") != "tool":
-            messages.append({"role": "assistant", "content": raw})
-            messages.append({"role": "user", "content": 'Invalid "type". Use {"type":"tool",...} or {"type":"final",...}.'})
-            continue
+        # --- TOOL ---
+        if t == "tool":
+            name = obj.get("name")
+            args = obj.get("args", {})
 
-        name = obj.get("name")
-        args = obj.get("args", {})
-
-        if name not in TOOLS:
-            messages.append({"role": "assistant", "content": raw})
-            messages.append({"role": "user", "content": f"Tool {name!r} does not exist. Choose from: {list(TOOLS.keys())}."})
-            continue
-
+            if name not in TOOLS:
+                messages.append({"role": "assistant", "content": raw})
+                messages.append({
+                    "role": "user",
+                    "content": f"Tool {name!r} does not exist. Choose from: {list(TOOLS.keys())}."
+                })
+                continue
         tool = TOOLS[name]
         try:
             result = tool.fn(**args)
@@ -209,11 +243,27 @@ def run_agent(task: str, model: str = "llama3.2", max_steps: int = 12) -> str:
         except Exception as e:
             result = f"ERROR: tool {name} failed: {e}"
 
-        # Feed tool result back to the model as "observation"
-        messages.append({"role": "assistant", "content": raw})
-        messages.append({"role": "user", "content": f"Observation from tool {name}: {result}"})
+        # Heuristic: advance step when tool succeeded (customize per tool if you like)
+        succeeded = not (isinstance(result, str) and result.startswith("ERROR"))
+        if succeeded and current_step < len(plan):
+            current_step += 1
 
-    return f"Stopped after {max_steps} steps without a final answer."
+        messages.append({"role": "assistant", "content": raw})
+        messages.append({
+            "role": "user",
+            "content": f"Observation from tool {name}: {result}"
+        })
+        continue
+
+    # ---- Unknown type ----
+    messages.append({"role": "assistant", "content": raw})
+    messages.append({
+        "role": "user",
+        "content": 'Invalid "type". Use "plan", "replan", "tool", or "final".'
+    ''})
+
+    return f"Stopped after {max_steps} iterations without a final answer."
+
 
 if __name__ == "__main__":
     # Try a couple tasks:
