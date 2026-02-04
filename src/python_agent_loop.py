@@ -113,25 +113,31 @@ TOOLS: Dict[str, Tool] = {
     ),
 }
 
-# --------------------------
-# Agent protocal
-# --------------------------
+# ----------------------------
+# Agent protocol
+# ----------------------------
 SYSTEM = """You are a tiny tool-using agent.
 
 You MUST respond with exactly one JSON object (no markdown, no extra text).
-    Choose one of these shapes:
+Choose one of these shapes:
 
-1) Tool call:
+1) Create a plan (first, or when replanning):
+{"type":"plan","steps":["step 1","step 2", "..."]}
+
+2) Replan (replace existing plan):
+{"type":"replan","steps":["step 1","step 2", "..."]}
+
+3) Tool call (execute the CURRENT plan step):
 {"type":"tool","name":"<tool_name>","args":{...}}
 
-2) Final answer:
+4) Final answer:
 {"type":"final","answer":"..."}
 
 Rules:
-- Only call tools that exist in the tool list.
-- If you need info from the environment/files, call a tool rather than guessing.
+- If no plan exists yet, you MUST respond with type="plan".
+- If a plan exists, you should work on the current step. Use tools to gather facts or perform actions.
 - Keep steps small and verify with tools when relevant.
-- You can only respond with a single tool that will be invoked per iteration
+- Only call tools that exist in the tool list.
 """
 
 def tools_manifest() -> str:
