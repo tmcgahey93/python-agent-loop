@@ -170,7 +170,7 @@ def format_plan(plan: List[str], current_step: int) -> str:
     for i, s in enumerate(plan):
         prefix = "->" if i == current_step else "  "
         check = "✓" if i < current_step else " "
-        lines.apend(f"{prefix} [{check}] {i+1}, {s}")
+        lines.append(f"{prefix} [{check}] {i+1}. {s}")
     return "\n".join(lines) if lines else "(empty plan)"
         
 def run_agent(task: str, model: str = "llama3.2", max_steps: int = 12) -> str:
@@ -210,7 +210,7 @@ def run_agent(task: str, model: str = "llama3.2", max_steps: int = 12) -> str:
             if not isinstance(steps_list, list) or not all(isinstance(x, str) for x in steps_list):
                 messages.append({"role": "assistant", "content": raw})
                 messages.append({
-                "role}": "user",
+                "role": "user",
                 "content": 'Plan must be {"type":"plan":"steps":[...strings...]}, Try again.'
                 })
                 continue
@@ -241,32 +241,31 @@ def run_agent(task: str, model: str = "llama3.2", max_steps: int = 12) -> str:
                     "content": f"Tool {name!r} does not exist. Choose from: {list(TOOLS.keys())}."
                 })
                 continue
-        tool = TOOLS[name]
-        try:
-            result = tool.fn(**args)
-        except TypeError as e:
-            result = f"ERROR: bad args for tool {name}: {e}"
-        except Exception as e:
-            result = f"ERROR: tool {name} failed: {e}"
 
-        # Heuristic: advance step when tool succeeded (customize per tool if you like)
-        succeeded = not (isinstance(result, str) and result.startswith("ERROR"))
-        if succeeded and current_step < len(plan):
-            current_step += 1
+            tool = TOOLS[name]
+            try:
+                result = tool.fn(**args)
+            except TypeError as e:
+                result = f"ERROR: bad args for tool {name}: {e}"
+            except Exception as e:
+                result = f"ERROR: tool {name} failed: {e}"
 
+            # Heuristic: advance step when tool succeeded (customize per tool if you like)
+            succeeded = not (isinstance(result, str) and result.startswith("ERROR"))
+            if succeeded and current_step < len(plan):
+                current_step += 1
+
+            messages.append({"role": "assistant", "content": raw})
+            messages.append({
+                "role": "user",
+                "content": f"Observation from tool {name}: {result}"
+            })
+            continue
+
+        # ---- Unknown type ----
         messages.append({"role": "assistant", "content": raw})
-        messages.append({
-            "role": "user",
-            "content": f"Observation from tool {name}: {result}"
+        messages.append({"role": "user", "content": 'Invalid "type". Use "plan", "replan", "tool", or "final".'''
         })
-        continue
-
-    # ---- Unknown type ----
-    messages.append({"role": "assistant", "content": raw})
-    messages.append({
-        "role": "user",
-        "content": 'Invalid "type". Use "plan", "replan", "tool", or "final".'
-    ''})
 
     return f"Stopped after {max_steps} iterations without a final answer."
 
