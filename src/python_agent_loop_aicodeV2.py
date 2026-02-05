@@ -3,22 +3,23 @@ import os
 import re
 import shlex
 import subprocess
-from dotenv import load_dotenv
-from dataclasses import dataclass 
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import requests
+from dotenv import load_dotenv
 
 load_dotenv()
 
-# --------------------------
+# ----------------------------
 # Ollama client
-# --------------------------
+# ----------------------------
 def ollama_chat(model: str, messages: List[Dict[str, str]], temperature: float = 0.2) -> str:
     """
     Calls Ollama's /api/chat endpoint.
     """
-    url=os.environ["LL_MODEL_URL"]
+    url = os.getenv("LL_MODEL_URL", "http://127.0.0.1:11434/api/chat")
+
     payload = {
         "model": model,
         "messages": messages,
@@ -30,9 +31,10 @@ def ollama_chat(model: str, messages: List[Dict[str, str]], temperature: float =
     data = resp.json()
     return data["message"]["content"]
 
-# --------------------------
+
+# ----------------------------
 # Tools
-# --------------------------
+# ----------------------------
 @dataclass
 class Tool:
     name: str
@@ -40,25 +42,24 @@ class Tool:
     args_schema: Dict[str, Any]
     fn: Callable[..., Any]
 
+
 def tool_calc(expression: str) -> str:
-    """
-    Very small calculator. Only allows digits/operators/paren/space/dot.
-    """
     if not re.fullmatch(r"[0-9+\-*/().\s]+", expression):
         return "ERROR: expression contains invalid characters"
     try:
-        #eval is safe-ish here because we strictly whitelist chars
         result = eval(expression, {"__builtins__": {}})
         return str(result)
     except Exception as e:
         return f"ERROR: {e}"
-        
+
+
 def tool_read_file(path: str) -> str:
     if not os.path.exists(path):
         return "ERROR: file does not exist"
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
-    
+
+
 def tool_write_file(path: str, content: str) -> str:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -67,17 +68,11 @@ def tool_write_file(path: str, content: str) -> str:
 
 
 def tool_run_shell(cmd: str) -> str:
-    """
-    Runs a shell command with basic safety rails:
-    - no interactive shells
-    - returns stdout/stderr
-    """
-    # You can tighten these rules further if you want.
     banned = ["rm -rf", ":(){", "mkfs", "dd ", "shutdown", "reboot"]
     lowered = cmd.lower()
     if any(b in lowered for b in banned):
         return "ERROR: command blocked by safety policy"
-    
+
     try:
         parts = shlex.split(cmd)
         p = subprocess.run(parts, capture_output=True, text=True, timeout=30)
@@ -85,6 +80,7 @@ def tool_run_shell(cmd: str) -> str:
         return out.strip() if out.strip() else f"(no output, exit={p.returncode})"
     except Exception as e:
         return f"ERROR: {e}"
+
 
 TOOLS: Dict[str, Tool] = {
     "calc": Tool(
@@ -112,6 +108,7 @@ TOOLS: Dict[str, Tool] = {
         fn=tool_run_shell,
     ),
 }
+
 
 # ----------------------------
 # Agent protocol
@@ -147,16 +144,12 @@ def tools_manifest() -> str:
     ]
     return json.dumps(tool_list, indent=2)
 
+
 def parse_agent_json(text: str) -> Tuple[Optional[Dict[str, Any]], str]:
-    """
-    Tries hard to find a JSON object in model output.
-    Returns (obj, error_message)
-    """
     text = text.strip()
     try:
         return json.loads(text), ""
     except Exception:
-        # attempt to extract first {...} block
         m = re.search(r"\{.*\}", text, re.DOTALL)
         if not m:
             return None, "No JSON object found in response."
@@ -164,7 +157,8 @@ def parse_agent_json(text: str) -> Tuple[Optional[Dict[str, Any]], str]:
             return json.loads(m.group(0)), ""
         except Exception as e:
             return None, f"Failed to parse extracted JSON: {e}"
-        
+
+
 def format_plan(plan: List[str], current_step: int) -> str:
     lines = []
     for i, s in enumerate(plan):
@@ -172,7 +166,8 @@ def format_plan(plan: List[str], current_step: int) -> str:
         check = "✓" if i < current_step else " "
         lines.append(f"{prefix} [{check}] {i+1}. {s}")
     return "\n".join(lines) if lines else "(empty plan)"
-        
+
+
 def run_agent(task: str, model: str = "llama3.2", max_steps: int = 20) -> str:
     plan: List[str] = []
     current_step = 0
@@ -239,7 +234,7 @@ def run_agent(task: str, model: str = "llama3.2", max_steps: int = 20) -> str:
         # ---- FINAL ----
         if t == "final":
             return obj.get("answer", "")
-        
+
         # ---- TOOL ----
         if t == "tool":
             name = obj.get("name")
@@ -276,7 +271,7 @@ def run_agent(task: str, model: str = "llama3.2", max_steps: int = 20) -> str:
         # ---- Unknown type ----
         messages.append({"role": "assistant", "content": raw})
         messages.append({
-            "role": "user", 
+            "role": "user",
             "content": 'Invalid "type". Use "plan", "replan", "tool", or "final".'
         })
 
