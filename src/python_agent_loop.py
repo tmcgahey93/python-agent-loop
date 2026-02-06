@@ -6,6 +6,7 @@ import subprocess
 from dotenv import load_dotenv
 from dataclasses import dataclass 
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from mcp_http import MCPHttpClient
 
 import requests
 
