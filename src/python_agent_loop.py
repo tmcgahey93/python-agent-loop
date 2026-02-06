@@ -175,6 +175,8 @@ TOOLS: Dict[str, Tool] = {
     ),
 }
 
+register_mcp_tools(TOOLS)
+
 # ----------------------------
 # Agent protocol
 # ----------------------------
