@@ -40,9 +40,9 @@ class MCPHttpClient:
         if self.session_id:
             headers["Mcp-Session-Id"] = self.session_id # session management header  [oai_citation:6‡Model Context Protocol](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports)
 
-        resp.self._session.post(
+        resp = self._session.post(
             self.endpoint_url,
-            data=json.dumps(ayload),
+            data=json.dumps(payload),
             headers=headers,
             timeout=self.timeout_s,
         )
@@ -59,7 +59,7 @@ class MCPHttpClient:
         if "application/json" in ctype:
             data = resp.json()
             if "error" in data:
-                raise RunTimeError(f"MCP error: {data['error']}")
+                raise RuntimeError(f"MCP error: {data['error']}")
             return data
         
         # Some servers may reply with SSE (text/event-stream) for streaming responses.  [oai_citation:8‡Model Context Protocol](https://modelcontextprotocol.io/specification/2025-03-26/basic/transports)
@@ -67,7 +67,7 @@ class MCPHttpClient:
         if "text/event-stream" in ctype:
             return self._read_sse_for_response(expected_id=msg_id, resp=resp)
         
-        raise RunTimeError(f"Unexpected Content-Type from MCP server: {ctype}")
+        raise RuntimeError(f"Unexpected Content-Type from MCP server: {ctype}")
     
     def _reead_sse_for_response(self, expected_id: str, resp: requests.Response) -> Dict[str, Any]:
         # Very small SSE parser: looks for lines starting with "data:" and parses JSON.
@@ -85,10 +85,10 @@ class MCPHttpClient:
 
             if isinstance(evt, dict) and evt.get("jsonrpc") == "2.0" and evt.get("id") == expected_id:
                 if "error" in evt:
-                    raise RunTimeError(f"MCP error: {evt['error']}")
+                    raise RuntimeError(f"MCP error: {evt['error']}")
                 return evt
         
-        raise RunTimeError("SSE stream ended before receiving expected JSON-RPC response")
+        raise RuntimeError("SSE stream ended before receiving expected JSON-RPC response")
     
     def intialization(self) -> None:
         """
