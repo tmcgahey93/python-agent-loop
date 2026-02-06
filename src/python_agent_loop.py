@@ -31,6 +31,68 @@ def ollama_chat(model: str, messages: List[Dict[str, str]], temperature: float =
     return data["message"]["content"]
 
 # --------------------------
+# MCP Tools
+# --------------------------
+def mcp_result_to_text(result: Dict[str, Any]) -> str:
+    """
+    MCP tool results can be structured; many servers return "content" with text parts.
+    We'll try to extract something readable.
+    """
+    res = result.get("result", {})
+    # Common pattern: {"Contect":[{"type":"text","text":"..."}], ...}
+    content = res.get("content")
+    if isinstance(content, list):
+        texts = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                texts.append(item.get("text", ""))
+            if texts:
+                return "/n".joint(t for t in texts if t)
+            
+    # Fallback: dump JSON
+    return json.dumps(result, indent=2)
+
+def register_mcp_tools(TOOLS: Dict[str, Any]) -> MCPHttpClient:
+    endpoint = os.environ["MCP_ENDPOINT_URL"]
+    token = os.getenv("MCP_BEARER_TOKEN") or None
+    
+    mcp = MCPHttpClient(endpoint_url=endpoint, bearer_token=token)
+
+    # Try initialize (some servers require it). If it fails, you’ll see the error.
+    try:
+        mcp.initialize()
+    except Exception as e:
+        # Many servers are stateless or have different init requirements—safe to continue and see if tools/list works.
+        print(f"[mcp] initialize warning: {e}")
+
+    tool_list_resp = mcp.list_tools()
+    tools = tool_list_resp["result"]["tools"]
+
+    for t in tools:
+        mcp_tool_name = t["name"]
+        input_schema = t.get("inputSchema", {"type": "object"})
+
+        # Namespacing avoids collisions with local tools
+        local_name = f"mcp.{mcp_tool_name}"
+
+        def make_fn(tool_name: str):
+            def _fn(**kwargs):
+                out = mcp.call_tool(tool_name, kwargs)
+                return mcp_result_to_text(out)
+            return _fn
+
+        TOOLS[local_name] = Tool(
+            name=local_name,
+            description=f"[MCP] {t.get('description','')}",
+            args_schema=input_schema,  # not perfect typing, but useful for the model
+            fn=make_fn(mcp_tool_name),
+        )
+
+    print(f"[mcp] registered {len(tools)} MCP tools")
+    return mcp
+
+
+# --------------------------
 # Tools
 # --------------------------
 @dataclass
