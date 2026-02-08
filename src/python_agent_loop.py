@@ -3,15 +3,16 @@ import os
 import re
 import shlex
 import subprocess
-import inspect 
+import inspect
 import asyncio
 from pathlib import Path
 from dotenv import load_dotenv
-from dataclasses import dataclass 
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from mcp_stdio_client import MCPStdioClient, mcp_result_to_text
 
 import requests
+
+from mcp_stdio_client import MCPStdioClient, mcp_result_to_text
 
 load_dotenv()
 
@@ -22,7 +23,7 @@ def ollama_chat(model: str, messages: List[Dict[str, str]], temperature: float =
     """
     Calls Ollama's /api/chat endpoint.
     """
-    url=os.environ["LL_MODEL_URL"]
+    url = os.environ["LL_MODEL_URL"]
     payload = {
         "model": model,
         "messages": messages,
@@ -34,47 +35,9 @@ def ollama_chat(model: str, messages: List[Dict[str, str]], temperature: float =
     data = resp.json()
     return data["message"]["content"]
 
-async def register_mcp_tools(TOOLS: Dict[str, Any]) -> MCPStdioClient:
-    server_path = str(Path(__file__).parent / "mcp_stdio_client.py")
-
-    mcp = MCPStdioClient(server_script_path=server_path, python_exe="./.venv/bin/python")
-    await mcp.start()
-
-    tools_resp = await mcp.list_tools()
-
-    # MCP Python SDK usually returns an objecg with '.tools'
-    tools = getattr(tools_resp, "tools", None)
-    if tools is None:
-        # fallback if shape differs
-        tools = getattr(getattr(tools_resp, "result", None), "tools", []) or []
-
-    for t in tools:
-        mcp_tool_name = getattr(t, "name", None) or (t.get("name") if isinstance(t, dict) else None)
-        desc = getattr(t, "description", "") or (t.get("description") if isinstance(t, dict) else "")
-        input_schema = getattr(t, "inputSchema", None) or (t.get("inputSchema") if isinstance(t, dict) else {"type": "object"})
-
-        if not mcp_tool_name:
-            continue
-        
-        local_name = f"mcp.{mcp_tool_name}"
-
-        # Capture tool name correctly in closure
-        async def _fn(_tool_name=mcp_tool_name, **kwargs):
-            out = await mcp.call_tool(_tool_name, kwargs)
-            return mcp_result_to_text(out)
-        
-        TOOLS[local_name] = Tool(
-            name=local_name,
-            description=f"[MCP stdio] {desc}",
-            args_schema=input_schema if isinstance(input_schema, dict) else {"schema": str(input_schema)},
-            fn=_fn # <- async function
-        )
-
-    print(f"[mcp] registered {len(tools)} MCP tools (stdio)")
-    return mcp
 
 # --------------------------
-# Tools
+# Tool abstraction
 # --------------------------
 @dataclass
 class Tool:
@@ -83,6 +46,10 @@ class Tool:
     args_schema: Dict[str, Any]
     fn: Callable[..., Any]
 
+
+# --------------------------
+# Local tools
+# --------------------------
 def tool_calc(expression: str) -> str:
     """
     Very small calculator. Only allows digits/operators/paren/space/dot.
@@ -90,18 +57,19 @@ def tool_calc(expression: str) -> str:
     if not re.fullmatch(r"[0-9+\-*/().\s]+", expression):
         return "ERROR: expression contains invalid characters"
     try:
-        #eval is safe-ish here because we strictly whitelist chars
         result = eval(expression, {"__builtins__": {}})
         return str(result)
     except Exception as e:
         return f"ERROR: {e}"
-        
+
+
 def tool_read_file(path: str) -> str:
     if not os.path.exists(path):
         return "ERROR: file does not exist"
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
-    
+
+
 def tool_write_file(path: str, content: str) -> str:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
@@ -115,12 +83,11 @@ def tool_run_shell(cmd: str) -> str:
     - no interactive shells
     - returns stdout/stderr
     """
-    # You can tighten these rules further if you want.
     banned = ["rm -rf", ":(){", "mkfs", "dd ", "shutdown", "reboot"]
     lowered = cmd.lower()
     if any(b in lowered for b in banned):
         return "ERROR: command blocked by safety policy"
-    
+
     try:
         parts = shlex.split(cmd)
         p = subprocess.run(parts, capture_output=True, text=True, timeout=30)
@@ -128,6 +95,7 @@ def tool_run_shell(cmd: str) -> str:
         return out.strip() if out.strip() else f"(no output, exit={p.returncode})"
     except Exception as e:
         return f"ERROR: {e}"
+
 
 TOOLS: Dict[str, Tool] = {
     "calc": Tool(
@@ -156,6 +124,55 @@ TOOLS: Dict[str, Tool] = {
     ),
 }
 
+
+# --------------------------
+# MCP tool registration (stdio)
+# --------------------------
+async def register_mcp_tools(tools_registry: Dict[str, Tool]) -> MCPStdioClient:
+    """
+    Spawns the MCP stdio server and registers all its tools as:
+      mcp.<tool_name>
+    """
+    server_path = str(Path(__file__).parent / "mcp_stdio_server.py")
+
+    # Use this venv python so imports match your current environment
+    mcp = MCPStdioClient(server_script_path=server_path, python_exe="./.venv/bin/python")
+    await mcp.start()
+
+    tools_resp = await mcp.list_tools()
+
+    # MCP Python SDK usually returns an object with `.tools`
+    tools = getattr(tools_resp, "tools", None)
+    if tools is None:
+        tools = getattr(getattr(tools_resp, "result", None), "tools", []) or []
+
+    for t in tools:
+        mcp_tool_name = getattr(t, "name", None) or (t.get("name") if isinstance(t, dict) else None)
+        desc = getattr(t, "description", "") or (t.get("description") if isinstance(t, dict) else "")
+        input_schema = getattr(t, "inputSchema", None) or (
+            t.get("inputSchema") if isinstance(t, dict) else {"type": "object"}
+        )
+
+        if not mcp_tool_name:
+            continue
+
+        local_name = f"mcp.{mcp_tool_name}"
+
+        async def _fn(_tool_name=mcp_tool_name, **kwargs):
+            out = await mcp.call_tool(_tool_name, kwargs)
+            return mcp_result_to_text(out)
+
+        tools_registry[local_name] = Tool(
+            name=local_name,
+            description=f"[MCP stdio] {desc}",
+            args_schema=input_schema if isinstance(input_schema, dict) else {"schema": str(input_schema)},
+            fn=_fn,
+        )
+
+    print(f"[mcp] registered {len(tools)} MCP tools (stdio)")
+    return mcp
+
+
 # ----------------------------
 # Agent protocol
 # ----------------------------
@@ -183,12 +200,14 @@ Rules:
 - Only call tools that exist in the tool list.
 """
 
+
 def tools_manifest() -> str:
     tool_list = [
         {"name": t.name, "description": t.description, "args_schema": t.args_schema}
         for t in TOOLS.values()
     ]
     return json.dumps(tool_list, indent=2)
+
 
 def parse_agent_json(text: str) -> Tuple[Optional[Dict[str, Any]], str]:
     """
@@ -199,7 +218,6 @@ def parse_agent_json(text: str) -> Tuple[Optional[Dict[str, Any]], str]:
     try:
         return json.loads(text), ""
     except Exception:
-        # attempt to extract first {...} block
         m = re.search(r"\{.*\}", text, re.DOTALL)
         if not m:
             return None, "No JSON object found in response."
@@ -207,7 +225,8 @@ def parse_agent_json(text: str) -> Tuple[Optional[Dict[str, Any]], str]:
             return json.loads(m.group(0)), ""
         except Exception as e:
             return None, f"Failed to parse extracted JSON: {e}"
-        
+
+
 def format_plan(plan: List[str], current_step: int) -> str:
     lines = []
     for i, s in enumerate(plan):
@@ -215,26 +234,30 @@ def format_plan(plan: List[str], current_step: int) -> str:
         check = "✓" if i < current_step else " "
         lines.append(f"{prefix} [{check}] {i+1}. {s}")
     return "\n".join(lines) if lines else "(empty plan)"
-        
+
+
 async def run_agent(task: str, model: str = "llama3.2", max_steps: int = 20) -> str:
     plan: List[str] = []
     current_step = 0
 
-    messages: List[Dict[str, str]] = [
-        {"role": "system", "content": SYSTEM},
-        {"role": "user", "content": f"Available tools:\n{tools_manifest()}"},
-        {"role": "user", "content": f"Task: {task}"},
-    ]
-
+    # Register MCP tools BEFORE we show tools to the LLM
     mcp_client = await register_mcp_tools(TOOLS)
+
     try:
+        messages: List[Dict[str, str]] = [
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content": f"Available tools:\n{tools_manifest()}"},
+            {"role": "user", "content": f"Task: {task}"},
+        ]
+
         for step in range(1, max_steps + 1):
-            # Provide plan context every loop (keeps model grounded)
             if plan:
-                messages.append({
-                    "role": "user",
-                    "content": "Current plan (arrow is current step):\n" + format_plan(plan, current_step)
-                })
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "Current plan (arrow is current step):\n" + format_plan(plan, current_step),
+                    }
+                )
             else:
                 messages.append({"role": "user", "content": "No plan exists yet. Create one."})
 
@@ -243,10 +266,12 @@ async def run_agent(task: str, model: str = "llama3.2", max_steps: int = 20) -> 
 
             if obj is None:
                 messages.append({"role": "assistant", "content": raw})
-                messages.append({
-                    "role": "user",
-                    "content": f"Invalid JSON. Error: {err}. Respond again with ONLY one JSON object."
-                })
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": f"Invalid JSON. Error: {err}. Respond again with ONLY one JSON object.",
+                    }
+                )
                 continue
 
             t = obj.get("type")
@@ -256,35 +281,32 @@ async def run_agent(task: str, model: str = "llama3.2", max_steps: int = 20) -> 
                 steps_list = obj.get("steps")
                 if not isinstance(steps_list, list) or not all(isinstance(x, str) for x in steps_list):
                     messages.append({"role": "assistant", "content": raw})
-                    messages.append({
-                        "role": "user",
-                        "content": 'Plan must be {"type":"plan","steps":[...strings...]}. Try again.'
-                    })
+                    messages.append(
+                        {"role": "user", "content": 'Plan must be {"type":"plan","steps":[...strings...]}. Try again.'}
+                    )
                     continue
 
                 plan = [s.strip() for s in steps_list if s.strip()]
                 current_step = 0
 
                 messages.append({"role": "assistant", "content": raw})
-                messages.append({
-                    "role": "user",
-                    "content": "Plan received. Begin executing step 1 using tool calls or finish if already done."
-                })
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": "Plan received. Begin executing step 1 using tool calls or finish if already done.",
+                    }
+                )
                 continue
 
-            # If no plan yet, force it
             if not plan and t != "plan":
                 messages.append({"role": "assistant", "content": raw})
-                messages.append({
-                    "role": "user",
-                    "content": 'No plan exists. You MUST respond with {"type":"plan","steps":[...]}.'
-                })
+                messages.append({"role": "user", "content": 'No plan exists. You MUST respond with {"type":"plan","steps":[...]}.'})
                 continue
 
             # ---- FINAL ----
             if t == "final":
                 return obj.get("answer", "")
-            
+
             # ---- TOOL ----
             if t == "tool":
                 name = obj.get("name")
@@ -292,10 +314,9 @@ async def run_agent(task: str, model: str = "llama3.2", max_steps: int = 20) -> 
 
                 if name not in TOOLS:
                     messages.append({"role": "assistant", "content": raw})
-                    messages.append({
-                        "role": "user",
-                        "content": f"Tool {name!r} does not exist. Choose from: {list(TOOLS.keys())}."
-                    })
+                    messages.append(
+                        {"role": "user", "content": f"Tool {name!r} does not exist. Choose from: {list(TOOLS.keys())}."}
+                    )
                     continue
 
                 tool = TOOLS[name]
@@ -304,34 +325,30 @@ async def run_agent(task: str, model: str = "llama3.2", max_steps: int = 20) -> 
                     if inspect.isawaitable(result):
                         result = await result
                 except TypeError as e:
-                    result = f"Error: bad args for tool {name}: {e}"
+                    result = f"ERROR: bad args for tool {name}: {e}"
                 except Exception as e:
-                    result = f"Error: tool {name} failed: {e}"
+                    result = f"ERROR: tool {name} failed: {e}"
 
-                # Heuristic: advance step when tool succeeded (customize per tool if you like)
                 succeeded = not (isinstance(result, str) and result.startswith("ERROR"))
                 if succeeded and current_step < len(plan):
                     current_step += 1
 
                 messages.append({"role": "assistant", "content": raw})
-                messages.append({
-                    "role": "user",
-                    "content": f"Observation from tool {name}: {result}"
-                })
+                messages.append({"role": "user", "content": f"Observation from tool {name}: {result}"})
                 continue
 
-            # ---- Unknown type ----
             messages.append({"role": "assistant", "content": raw})
-            messages.append({
-                "role": "user", 
-                "content": 'Invalid "type". Use "plan", "replan", "tool", or "final".'
-            })
+            messages.append({"role": "user", "content": 'Invalid "type". Use "plan", "replan", "tool", or "final".'})
+
+        return f"Stopped after {max_steps} iterations without a final answer."
     finally:
         await mcp_client.close()
-
-    return f"Stopped after {max_steps} iterations without a final answer."
 
 
 if __name__ == "__main__":
     print(asyncio.run(run_agent("Compute (17*3) + 2 and return the number only.")))
-    print(asyncio.run(run_agent("Write a file ./out/hello.txt that contains 'hello from the agent', then read it back and confirm contents.")))
+    print(
+        asyncio.run(
+            run_agent("Write a file ./out/hello.txt that contains 'hello from the agent', then read it back and confirm contents.")
+        )
+    )
