@@ -235,6 +235,14 @@ def format_plan(plan: List[str], current_step: int) -> str:
         lines.append(f"{prefix} [{check}] {i+1}. {s}")
     return "\n".join(lines) if lines else "(empty plan)"
 
+def print_registered_tools():
+    print("\n=== REGISTERED TOOLS ===")
+    for name, tool in TOOLS.items():
+        source = "MCP" if name.startswith("mcp.") else "LOCAL"
+        print(f"- [{source}] {tool.name}")
+        print(f"    description: {tool.description}")
+        print(f"    args_schema: {tool.args_schema}")
+    print("========================\n")
 
 async def run_agent(task: str, model: str = "llama3.2", max_steps: int = 20) -> str:
     plan: List[str] = []
@@ -242,6 +250,8 @@ async def run_agent(task: str, model: str = "llama3.2", max_steps: int = 20) -> 
 
     # Register MCP tools BEFORE we show tools to the LLM
     mcp_client = await register_mcp_tools(TOOLS)
+
+    print_registered_tools()
 
     try:
         messages: List[Dict[str, str]] = [
@@ -346,6 +356,7 @@ async def run_agent(task: str, model: str = "llama3.2", max_steps: int = 20) -> 
 
 
 if __name__ == "__main__":
+    print(asyncio.run(run_agent("Add 10 + 5)")))
     print(asyncio.run(run_agent("Compute (17*3) + 2 and return the number only.")))
     print(
         asyncio.run(
