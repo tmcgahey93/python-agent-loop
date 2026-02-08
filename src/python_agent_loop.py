@@ -4,6 +4,7 @@ import re
 import shlex
 import subprocess
 import inspect 
+import asyncio
 from pathlib import Path
 from dotenv import load_dotenv
 from dataclasses import dataclass 
@@ -33,33 +34,11 @@ def ollama_chat(model: str, messages: List[Dict[str, str]], temperature: float =
     data = resp.json()
     return data["message"]["content"]
 
-# --------------------------
-# MCP Tools
-# --------------------------
-def mcp_result_to_text(result: Dict[str, Any]) -> str:
-    """
-    MCP tool results can be structured; many servers return "content" with text parts.
-    We'll try to extract something readable.
-    """
-    res = result.get("result", {})
-    # Common pattern: {"Contect":[{"type":"text","text":"..."}], ...}
-    content = res.get("content")
-    if isinstance(content, list):
-        texts = []
-        for item in content:
-            if isinstance(item, dict) and item.get("type") == "text":
-                texts.append(item.get("text", ""))
-            if texts:
-                return "/n".joint(t for t in texts if t)
-            
-    # Fallback: dump JSON
-    return json.dumps(result, indent=2)
-
 async def register_mcp_tools(TOOLS: Dict[str, Any]) -> MCPStdioClient:
-    server_path = str(Path(__file__).parent / "mcp_stdio_server.py")
+    server_path = str(Path(__file__).parent / "mcp_stdio_client.py")
 
-    mcp = MCPStdioClient(server_script_path=server_path, python_exe="././venv.bin/python")
-    await mcp.start
+    mcp = MCPStdioClient(server_script_path=server_path, python_exe="./.venv/bin/python")
+    await mcp.start()
 
     tools_resp = await mcp.list_tools()
 
@@ -70,7 +49,7 @@ async def register_mcp_tools(TOOLS: Dict[str, Any]) -> MCPStdioClient:
         tools = getattr(getattr(tools_resp, "result", None), "tools", []) or []
 
     for t in tools:
-        mcp_tool_name = getattr(t, "name, None") or (t.get("name") if isinstance(t. dict) else None)
+        mcp_tool_name = getattr(t, "name", None) or (t.get("name") if isinstance(t, dict) else None)
         desc = getattr(t, "description", "") or (t.get("description") if isinstance(t, dict) else "")
         input_schema = getattr(t, "inputSchema", None) or (t.get("inputSchema") if isinstance(t, dict) else {"type": "object"})
 
@@ -86,14 +65,13 @@ async def register_mcp_tools(TOOLS: Dict[str, Any]) -> MCPStdioClient:
         
         TOOLS[local_name] = Tool(
             name=local_name,
-            decsription=f"[MCP stdio] {desc}",
+            description=f"[MCP stdio] {desc}",
             args_schema=input_schema if isinstance(input_schema, dict) else {"schema": str(input_schema)},
-            fn=_fn # <- assync function
+            fn=_fn # <- async function
         )
 
     print(f"[mcp] registered {len(tools)} MCP tools (stdio)")
     return mcp
-
 
 # --------------------------
 # Tools
@@ -178,8 +156,6 @@ TOOLS: Dict[str, Tool] = {
     ),
 }
 
-register_mcp_tools(TOOLS)
-
 # ----------------------------
 # Agent protocol
 # ----------------------------
@@ -240,7 +216,7 @@ def format_plan(plan: List[str], current_step: int) -> str:
         lines.append(f"{prefix} [{check}] {i+1}. {s}")
     return "\n".join(lines) if lines else "(empty plan)"
         
-def run_agent(task: str, model: str = "llama3.2", max_steps: int = 20) -> str:
+async def run_agent(task: str, model: str = "llama3.2", max_steps: int = 20) -> str:
     plan: List[str] = []
     current_step = 0
 
@@ -250,106 +226,112 @@ def run_agent(task: str, model: str = "llama3.2", max_steps: int = 20) -> str:
         {"role": "user", "content": f"Task: {task}"},
     ]
 
-    for step in range(1, max_steps + 1):
-        # Provide plan context every loop (keeps model grounded)
-        if plan:
-            messages.append({
-                "role": "user",
-                "content": "Current plan (arrow is current step):\n" + format_plan(plan, current_step)
-            })
-        else:
-            messages.append({"role": "user", "content": "No plan exists yet. Create one."})
+    mcp_client = await register_mcp_tools(TOOLS)
+    try:
+        for step in range(1, max_steps + 1):
+            # Provide plan context every loop (keeps model grounded)
+            if plan:
+                messages.append({
+                    "role": "user",
+                    "content": "Current plan (arrow is current step):\n" + format_plan(plan, current_step)
+                })
+            else:
+                messages.append({"role": "user", "content": "No plan exists yet. Create one."})
 
-        raw = ollama_chat(model=model, messages=messages)
-        obj, err = parse_agent_json(raw)
+            raw = ollama_chat(model=model, messages=messages)
+            obj, err = parse_agent_json(raw)
 
-        if obj is None:
-            messages.append({"role": "assistant", "content": raw})
-            messages.append({
-                "role": "user",
-                "content": f"Invalid JSON. Error: {err}. Respond again with ONLY one JSON object."
-            })
-            continue
-
-        t = obj.get("type")
-
-        # ---- PLAN / REPLAN ----
-        if t in ("plan", "replan"):
-            steps_list = obj.get("steps")
-            if not isinstance(steps_list, list) or not all(isinstance(x, str) for x in steps_list):
+            if obj is None:
                 messages.append({"role": "assistant", "content": raw})
                 messages.append({
                     "role": "user",
-                    "content": 'Plan must be {"type":"plan","steps":[...strings...]}. Try again.'
+                    "content": f"Invalid JSON. Error: {err}. Respond again with ONLY one JSON object."
                 })
                 continue
 
-            plan = [s.strip() for s in steps_list if s.strip()]
-            current_step = 0
+            t = obj.get("type")
 
-            messages.append({"role": "assistant", "content": raw})
-            messages.append({
-                "role": "user",
-                "content": "Plan received. Begin executing step 1 using tool calls or finish if already done."
-            })
-            continue
+            # ---- PLAN / REPLAN ----
+            if t in ("plan", "replan"):
+                steps_list = obj.get("steps")
+                if not isinstance(steps_list, list) or not all(isinstance(x, str) for x in steps_list):
+                    messages.append({"role": "assistant", "content": raw})
+                    messages.append({
+                        "role": "user",
+                        "content": 'Plan must be {"type":"plan","steps":[...strings...]}. Try again.'
+                    })
+                    continue
 
-        # If no plan yet, force it
-        if not plan and t != "plan":
-            messages.append({"role": "assistant", "content": raw})
-            messages.append({
-                "role": "user",
-                "content": 'No plan exists. You MUST respond with {"type":"plan","steps":[...]}.'
-            })
-            continue
+                plan = [s.strip() for s in steps_list if s.strip()]
+                current_step = 0
 
-        # ---- FINAL ----
-        if t == "final":
-            return obj.get("answer", "")
-        
-        # ---- TOOL ----
-        if t == "tool":
-            name = obj.get("name")
-            args = obj.get("args", {})
-
-            if name not in TOOLS:
                 messages.append({"role": "assistant", "content": raw})
                 messages.append({
                     "role": "user",
-                    "content": f"Tool {name!r} does not exist. Choose from: {list(TOOLS.keys())}."
+                    "content": "Plan received. Begin executing step 1 using tool calls or finish if already done."
                 })
                 continue
 
-            tool = TOOLS[name]
-            try:
-                result = tool.fn(**args)
-            except TypeError as e:
-                result = f"ERROR: bad args for tool {name}: {e}"
-            except Exception as e:
-                result = f"ERROR: tool {name} failed: {e}"
+            # If no plan yet, force it
+            if not plan and t != "plan":
+                messages.append({"role": "assistant", "content": raw})
+                messages.append({
+                    "role": "user",
+                    "content": 'No plan exists. You MUST respond with {"type":"plan","steps":[...]}.'
+                })
+                continue
 
-            # Heuristic: advance step when tool succeeded (customize per tool if you like)
-            succeeded = not (isinstance(result, str) and result.startswith("ERROR"))
-            if succeeded and current_step < len(plan):
-                current_step += 1
+            # ---- FINAL ----
+            if t == "final":
+                return obj.get("answer", "")
+            
+            # ---- TOOL ----
+            if t == "tool":
+                name = obj.get("name")
+                args = obj.get("args", {})
 
+                if name not in TOOLS:
+                    messages.append({"role": "assistant", "content": raw})
+                    messages.append({
+                        "role": "user",
+                        "content": f"Tool {name!r} does not exist. Choose from: {list(TOOLS.keys())}."
+                    })
+                    continue
+
+                tool = TOOLS[name]
+                try:
+                    result = tool.fn(**args)
+                    if inspect.isawaitable(result):
+                        result = await result
+                except TypeError as e:
+                    result = f"Error: bad args for tool {name}: {e}"
+                except Exception as e:
+                    result = f"Error: tool {name} failed: {e}"
+
+                # Heuristic: advance step when tool succeeded (customize per tool if you like)
+                succeeded = not (isinstance(result, str) and result.startswith("ERROR"))
+                if succeeded and current_step < len(plan):
+                    current_step += 1
+
+                messages.append({"role": "assistant", "content": raw})
+                messages.append({
+                    "role": "user",
+                    "content": f"Observation from tool {name}: {result}"
+                })
+                continue
+
+            # ---- Unknown type ----
             messages.append({"role": "assistant", "content": raw})
             messages.append({
-                "role": "user",
-                "content": f"Observation from tool {name}: {result}"
+                "role": "user", 
+                "content": 'Invalid "type". Use "plan", "replan", "tool", or "final".'
             })
-            continue
-
-        # ---- Unknown type ----
-        messages.append({"role": "assistant", "content": raw})
-        messages.append({
-            "role": "user", 
-            "content": 'Invalid "type". Use "plan", "replan", "tool", or "final".'
-        })
+    finally:
+        await mcp_client.close()
 
     return f"Stopped after {max_steps} iterations without a final answer."
 
 
 if __name__ == "__main__":
-    print(run_agent("Compute (17*3) + 2 and return the number only."))
-    print(run_agent("Write a file ./out/hello.txt that contains 'hello from the agent', then read it back and confirm contents."))
+    print(asyncio.run(run_agent("Compute (17*3) + 2 and return the number only.")))
+    print(asyncio.run(run_agent("Write a file ./out/hello.txt that contains 'hello from the agent', then read it back and confirm contents.")))
