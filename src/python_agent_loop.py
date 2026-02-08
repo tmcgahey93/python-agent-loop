@@ -6,7 +6,7 @@ import subprocess
 from dotenv import load_dotenv
 from dataclasses import dataclass 
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from mcp_http import MCPHttpClient
+from mcp_stdio_client import MCPStdioClient
 
 import requests
 
@@ -53,11 +53,11 @@ def mcp_result_to_text(result: Dict[str, Any]) -> str:
     # Fallback: dump JSON
     return json.dumps(result, indent=2)
 
-def register_mcp_tools(TOOLS: Dict[str, Any]) -> MCPHttpClient:
+def register_mcp_tools(TOOLS: Dict[str, Any]) -> MCPStdioClient:
     endpoint = os.environ["MCP_ENDPOINT_URL"]
     token = os.getenv("MCP_BEARER_TOKEN") or None
     
-    mcp = MCPHttpClient(endpoint_url=endpoint, bearer_token=token)
+    mcp = MCPStdioClient(endpoint_url=endpoint, bearer_token=token)
 
     # Try initialize (some servers require it). If it fails, you’ll see the error.
     try:
