@@ -5,11 +5,9 @@ from typing import Any, Dict, Optional
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-def _result_to_text(result: Any) -> str:
-    """
-    Convert MCP tool call result to readable text.
-    FastMCP typically returns content parts (TextContent, etc.).
-    """
+
+def mcp_result_to_text(result: Any) -> str:
+    # FastMCP commonly returns result.content = [TextContent(...)]
     content = getattr(result, "content", None)
     if isinstance(content, list):
         texts = []
@@ -17,48 +15,43 @@ def _result_to_text(result: Any) -> str:
             text = getattr(item, "text", None)
             if isinstance(text, str) and text:
                 texts.append(text)
-            if texts:
-                return "\n".join(texts)
-            
-        # fallback
-        try:
-            return json.dumps(result, indent=2, default=str)
-        except Exception:
-            return str(result)
-        
-class MCPStdioClient:
-    """
-    Spawn an MCP server (stdio transport) and call tools.
-    """
+        if texts:
+            return "\n".join(texts)
 
-    def __init__(self, server_script_path: str, python_exe: str = "python3", env: Optional[Dict[str, str]]):
+    # fallback
+    try:
+        return json.dumps(result, indent=2, default=str)
+    except Exception:
+        return str(result)
+
+
+class MCPStdioClient:
+    def __init__(self, server_script_path: str, python_exe: str = "python3", env: Optional[Dict[str, str]] = None):
         self.server_script_path = server_script_path
         self.python_exe = python_exe
         self.env = env
 
-        self.stack = AsyncExitStack()
+        self._stack = AsyncExitStack()
         self.session: ClientSession | None = None
 
-    async def __aenter__(self) -> "MCPStdioClient":
+    async def start(self) -> None:
         params = StdioServerParameters(
             command=self.python_exe,
             args=[self.server_script_path],
-            env=self_env,
+            env=self.env,
         )
         read_stream, write_stream = await self._stack.enter_async_context(stdio_client(params))
         self.session = await self._stack.enter_async_context(ClientSession(read_stream, write_stream))
         await self.session.initialize()
-        return self
-    
-    async def __aexit__(self, exec_type, exc_tb) -> None:
+
+    async def close(self) -> None:
         await self._stack.aclose()
 
-    async def list_tools(self) -> Any:
+    async def list_tools(self):
         assert self.session is not None
         return await self.session.list_tools()
-    
-    async def call_tools(self, name: str, arguments: Dict[str, Any]) -> str:
+
+    async def call_tool(self, name: str, arguments: Dict[str, Any]):
         assert self.session is not None
-        res = await self.session.call_tool(name, arguments)
-        return _result_to_text(res)
+        return await self.session.call_tool(name, arguments)
 
