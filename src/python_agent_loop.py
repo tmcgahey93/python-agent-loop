@@ -3,10 +3,12 @@ import os
 import re
 import shlex
 import subprocess
+import inspect 
+from pathlib import Path
 from dotenv import load_dotenv
 from dataclasses import dataclass 
 from typing import Any, Callable, Dict, List, Optional, Tuple
-from mcp_stdio_client import MCPStdioClient
+from mcp_stdio_client import MCPStdioClient, mcp_result_to_text
 
 import requests
 
@@ -53,43 +55,43 @@ def mcp_result_to_text(result: Dict[str, Any]) -> str:
     # Fallback: dump JSON
     return json.dumps(result, indent=2)
 
-def register_mcp_tools(TOOLS: Dict[str, Any]) -> MCPStdioClient:
-    endpoint = os.environ["MCP_ENDPOINT_URL"]
-    token = os.getenv("MCP_BEARER_TOKEN") or None
-    
-    mcp = MCPStdioClient(endpoint_url=endpoint, bearer_token=token)
+async def register_mcp_tools(TOOLS: Dict[str, Any]) -> MCPStdioClient:
+    server_path = str(Path(__file__).parent / "mcp_stdio_server.py")
 
-    # Try initialize (some servers require it). If it fails, you’ll see the error.
-    try:
-        mcp.initialize()
-    except Exception as e:
-        # Many servers are stateless or have different init requirements—safe to continue and see if tools/list works.
-        print(f"[mcp] initialize warning: {e}")
+    mcp = MCPStdioClient(server_script_path=server_path, python_exe="././venv.bin/python")
+    await mcp.start
 
-    tool_list_resp = mcp.list_tools()
-    tools = tool_list_resp["result"]["tools"]
+    tools_resp = await mcp.list_tools()
+
+    # MCP Python SDK usually returns ann objecg with '.tools'
+    tools = getattr(tools_resp, "tools", None)
+    if tools is None:
+        # fallback if shape differs
+        tools = getattr(getattr(tools_resp, "result", None), "tools", []) or []
 
     for t in tools:
-        mcp_tool_name = t["name"]
-        input_schema = t.get("inputSchema", {"type": "object"})
+        mcp_tool_name = getattr(t, "name, None") or (t.get("name") if isinstance(t. dict) else None)
+        desc = getattr(t, "description", "") or (t.get("description") if isinstance(t, dict) else "")
+        input_schema = getattr(t, "inputSchema", None) or (t.get("inputSchema") if isinstance(t, dict) else {"type": "object"})
 
-        # Namespacing avoids collisions with local tools
+        if not mcp_tool_name:
+            continue
+        
         local_name = f"mcp.{mcp_tool_name}"
 
-        def make_fn(tool_name: str):
-            def _fn(**kwargs):
-                out = mcp.call_tool(tool_name, kwargs)
-                return mcp_result_to_text(out)
-            return _fn
-
+        # Capture tool name correctly in closure
+        async def _fn(_tool_name=mcp_tool_name, **kwargs):
+            out = await mcp.call_tool(_tool_name, kwargs)
+            return mcp_result_to_text(out)
+        
         TOOLS[local_name] = Tool(
             name=local_name,
-            description=f"[MCP] {t.get('description','')}",
-            args_schema=input_schema,  # not perfect typing, but useful for the model
-            fn=make_fn(mcp_tool_name),
+            decsription=f"[MCP stdio] {desc}",
+            args_schema=input_schema if isinstance(input_schema, dict) else {"schema": str(input_schema)},
+            fn=_fn # <- assync function
         )
 
-    print(f"[mcp] registered {len(tools)} MCP tools")
+    print(f"[mcp] registered {len(tools)} MCP tools (stdio)")
     return mcp
 
 
