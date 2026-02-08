@@ -42,7 +42,7 @@ async def register_mcp_tools(TOOLS: Dict[str, Any]) -> MCPStdioClient:
 
     tools_resp = await mcp.list_tools()
 
-    # MCP Python SDK usually returns ann objecg with '.tools'
+    # MCP Python SDK usually returns an objecg with '.tools'
     tools = getattr(tools_resp, "tools", None)
     if tools is None:
         # fallback if shape differs
